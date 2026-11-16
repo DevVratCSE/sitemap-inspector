@@ -1,7 +1,7 @@
 # Sitemap Inspector
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)](https://opensource.org/licenses/MIT)
-[![Cloudflare Workers](https://img.shields.io/badge/Platform-Cloudflare%20Workers%20Free-orange.svg)](https://developers.cloudflare.com/workers/)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Cloudflare%20Workers-orange.svg)](https://sitemap-inspector.pagespeed-monitor.workers.dev)
 [![TypeScript](https://img.shields.io/badge/Language-TypeScript-blue.svg)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/Frontend-React%2018%20%2B%20Vite-61dafb.svg)](https://react.dev/)
 [![Privacy: Zero Data Retention](https://img.shields.io/badge/Privacy-Zero%20Data%20Retention-emerald.svg)](./PRIVACY.md)
@@ -9,6 +9,8 @@
 **Sitemap Inspector** is an open-source, stateless, browser-first technical SEO auditing tool designed to run 100% within the **Cloudflare Workers Free Plan**.
 
 It automatically discovers `robots.txt`, identifies XML sitemaps and nested sitemap indexes, audits HTTP status codes, tracks redirect chains, calculates transparent health metrics, and generates professional PDF and sanitized CSV reports **entirely inside your browser**.
+
+🔗 **Live Production Application:** [https://sitemap-inspector.pagespeed-monitor.workers.dev](https://sitemap-inspector.pagespeed-monitor.workers.dev)
 
 ---
 
