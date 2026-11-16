@@ -6,6 +6,7 @@ import { AuditControls } from '@/components/dashboard/AuditControls';
 import { MetricCards } from '@/components/dashboard/MetricCards';
 import { QualityIssuesCard } from '@/components/dashboard/QualityIssuesCard';
 import { ResultsTable } from '@/components/results/ResultsTable';
+import { ReportExportBar } from '@/components/reports/ReportExportBar';
 import { AuditConfig, AuditState, UrlAuditResult } from '@/types';
 import {
   discoverSitemaps,
@@ -28,7 +29,8 @@ export const App: React.FC = () => {
     return false;
   });
 
-  // Ephemeral in-memory audit state
+  const [targetDomain, setTargetDomain] = useState<string>('');
+  const [targetUrl, setTargetUrl] = useState<string>('');
   const [auditState, setAuditState] = useState<AuditState>('idle');
   const [discoverySummary, setDiscoverySummary] = useState<DiscoverySummary | null>(null);
   const [auditResults, setAuditResults] = useState<UrlAuditResult[]>([]);
@@ -73,7 +75,15 @@ export const App: React.FC = () => {
     return calculateSitemapQuality(discoverySummary, auditResults);
   }, [discoverySummary, auditResults]);
 
-  const handleStartAudit = async (targetUrl: string, config: AuditConfig) => {
+  const handleStartAudit = async (rawUrl: string, config: AuditConfig) => {
+    try {
+      const parsed = new URL(rawUrl);
+      setTargetDomain(parsed.hostname);
+      setTargetUrl(rawUrl);
+    } catch {
+      setTargetDomain('example.com');
+      setTargetUrl(rawUrl);
+    }
     setAuditState('discovering');
     setDiscoverySummary(null);
     setAuditResults([]);
@@ -204,6 +214,17 @@ export const App: React.FC = () => {
             />
 
             <QualityIssuesCard metrics={sitemapMetrics} />
+
+            <ReportExportBar
+              domain={targetDomain || 'example.com'}
+              targetUrl={targetUrl}
+              auditState={auditState}
+              durationMs={durationMs}
+              discovery={discoverySummary}
+              httpMetrics={httpMetrics}
+              sitemapMetrics={sitemapMetrics}
+              results={auditResults}
+            />
 
             <ResultsTable results={auditResults} />
           </div>
