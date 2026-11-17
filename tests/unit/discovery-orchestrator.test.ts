@@ -255,4 +255,83 @@ describe('Sitemap Discovery Orchestrator', () => {
     expect(result.urls).toHaveLength(1);
     expect(result.urls[0].url).toBe('https://example.com/wp-post-1');
   });
+
+  it('recovers via standard fallback when robots.txt declared sitemap yields 0 URLs', async () => {
+    const mockFetcher = vi.fn(async (url: string): Promise<FetchedResource> => {
+      // robots.txt declares an obsolete sitemap.xml
+      if (url === 'https://example.com/robots.txt') {
+        return {
+          url,
+          content: 'User-agent: *\nSitemap: https://example.com/sitemap.xml',
+          contentType: 'text/plain',
+          isGzip: false,
+          fetchedVia: 'direct',
+          sizeBytes: 60,
+        };
+      }
+      // sitemap.xml is a broken index that yields 0 URLs
+      if (url === 'https://example.com/sitemap.xml') {
+        return {
+          url,
+          content: `<?xml version="1.0" encoding="UTF-8"?>
+            <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <sitemap><loc>https://example.com/sitemap.xml?page=1</loc></sitemap>
+            </sitemapindex>`,
+          contentType: 'application/xml',
+          isGzip: false,
+          fetchedVia: 'direct',
+          sizeBytes: 150,
+        };
+      }
+      if (url === 'https://example.com/sitemap.xml?page=1') {
+        // Returns the same index with 0 urls
+        return {
+          url,
+          content: `<?xml version="1.0" encoding="UTF-8"?>
+            <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <sitemap><loc>https://example.com/sitemap.xml?page=1</loc></sitemap>
+            </sitemapindex>`,
+          contentType: 'application/xml',
+          isGzip: false,
+          fetchedVia: 'direct',
+          sizeBytes: 150,
+        };
+      }
+      // Fallback recovery probes /sitemap_index.xml and finds active dynamic sitemap!
+      if (url === 'https://example.com/sitemap_index.xml') {
+        return {
+          url,
+          content: `<?xml version="1.0" encoding="UTF-8"?>
+            <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>https://example.com/recovered-post-1</loc></url>
+              <url><loc>https://example.com/recovered-post-2</loc></url>
+            </urlset>`,
+          contentType: 'application/xml',
+          isGzip: false,
+          fetchedVia: 'direct',
+          sizeBytes: 250,
+        };
+      }
+      throw new Error('Not found');
+    });
+
+    const result = await discoverSitemaps(
+      'https://example.com',
+      defaultConfig,
+      undefined,
+      mockFetcher,
+    );
+
+    // Initial broken sitemaps yielded 0 URLs, but Fallback Recovery found /sitemap_index.xml
+    expect(result.urls).toHaveLength(2);
+    expect(result.urls.map((u) => u.url)).toEqual([
+      'https://example.com/recovered-post-1',
+      'https://example.com/recovered-post-2',
+    ]);
+    expect(
+      result.warnings.some((w) =>
+        w.includes('Initial sitemaps yielded 0 URLs. Recovered active alternative sitemap'),
+      ),
+    ).toBe(true);
+  });
 });

@@ -28,12 +28,15 @@ export type DiscoveryProgressCallback = (progress: DiscoveryProgress) => void;
 
 /**
  * Standard fallback sitemap paths checked when robots.txt yields no sitemap directives
+ * or when declared sitemaps yield 0 URLs.
+ * Prioritizes dynamic CMS sitemap indexes (/sitemap_index.xml, /wp-sitemap.xml)
+ * followed by standard static and feed locations.
  */
 const STANDARD_SITEMAP_FALLBACKS = [
-  '/sitemap.xml',
   '/sitemap_index.xml',
-  '/sitemap-index.xml',
   '/wp-sitemap.xml',
+  '/sitemap.xml',
+  '/sitemap-index.xml',
   '/sitemap.xml.gz',
   '/sitemap_index.xml.gz',
   '/post-sitemap.xml',
@@ -195,6 +198,110 @@ export async function discoverSitemaps(
   }
 
   // Step 3: Traversal of sitemaps
+  const processQueue = async (queue: typeof sitemapQueue) => {
+    while (queue.length > 0) {
+      if (visitedSitemaps.size >= maxSitemapCount) {
+        warnings.push(`Reached maximum sitemap count limit (${maxSitemapCount}).`);
+        break;
+      }
+
+      const current = queue.shift()!;
+      if (visitedSitemaps.has(current.url)) {
+        continue; // Prevent cycles
+      }
+
+      visitedSitemaps.add(current.url);
+
+      onProgress?.({
+        phase: 'traversal',
+        message: `Parsing sitemap: ${current.url}`,
+        sitemapsFound: visitedSitemaps.size,
+        urlsDiscovered: urlMap.size,
+      });
+
+      try {
+        const resource = await fetcher(current.url);
+        const parsed = parseSitemapXml(resource.content, current.url);
+
+        const sitemapMeta: DiscoveredSitemap = {
+          url: current.url,
+          type:
+            parsed.type === 'index'
+              ? 'index'
+              : parsed.type === 'rss'
+                ? 'rss'
+                : parsed.type === 'text'
+                  ? 'text'
+                  : 'standard',
+          urlCount: parsed.urls.length,
+          discoveredVia: current.discoveredVia,
+          isValid: parsed.isValid,
+          error: parsed.errors.length > 0 ? parsed.errors.join('; ') : undefined,
+          children: parsed.childSitemaps.length > 0 ? parsed.childSitemaps : undefined,
+        };
+
+        discoveredSitemaps.push(sitemapMeta);
+
+        if (parsed.errors.length > 0) {
+          errors.push(`Errors in ${current.url}: ${parsed.errors.join(', ')}`);
+        }
+        if (parsed.warnings.length > 0) {
+          warnings.push(...parsed.warnings.map((w) => `[${current.url}] ${w}`));
+        }
+
+        // If sitemap index, enqueue children
+        if (parsed.type === 'index' && parsed.childSitemaps.length > 0) {
+          if (current.depth < maxDepth) {
+            for (const childUrl of parsed.childSitemaps) {
+              if (!visitedSitemaps.has(childUrl)) {
+                queue.push({
+                  url: childUrl,
+                  depth: current.depth + 1,
+                  discoveredVia: 'index_child',
+                });
+              }
+            }
+          } else {
+            warnings.push(`Reached maximum recursion depth (${maxDepth}) at ${current.url}`);
+          }
+        }
+
+        // Collect URLs
+        for (const discoveredUrl of parsed.urls) {
+          totalDiscoveredCount++;
+          if (urlMap.has(discoveredUrl.url)) {
+            duplicateUrlCount++;
+          } else {
+            if (urlMap.size >= maxUrls) {
+              limitReached = true;
+              // Stop processing once configured ceiling is reached
+              break;
+            }
+            urlMap.set(discoveredUrl.url, discoveredUrl);
+          }
+        }
+
+        if (limitReached) {
+          warnings.push(
+            `Configured audit limit of ${maxUrls} URLs reached. Stopping further discovery.`,
+          );
+          break;
+        }
+      } catch (fetchErr: unknown) {
+        const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+        discoveredSitemaps.push({
+          url: current.url,
+          type: 'standard',
+          urlCount: 0,
+          discoveredVia: current.discoveredVia,
+          isValid: false,
+          error: msg,
+        });
+        errors.push(`Failed to fetch sitemap ${current.url}: ${msg}`);
+      }
+    }
+  };
+
   onProgress?.({
     phase: 'traversal',
     message: `Traversing ${sitemapQueue.length} identified sitemap(s)...`,
@@ -202,105 +309,64 @@ export async function discoverSitemaps(
     urlsDiscovered: 0,
   });
 
-  while (sitemapQueue.length > 0) {
-    if (visitedSitemaps.size >= maxSitemapCount) {
-      warnings.push(`Reached maximum sitemap count limit (${maxSitemapCount}).`);
-      break;
-    }
+  await processQueue(sitemapQueue);
 
-    const current = sitemapQueue.shift()!;
-    if (visitedSitemaps.has(current.url)) {
-      continue; // Prevent cycles
-    }
-
-    visitedSitemaps.add(current.url);
-
+  // Step 4: Fallback Recovery
+  // If initial discovery produced 0 URLs (e.g. obsolete or degenerate sitemaps declared in robots.txt),
+  // probe standard fallback locations (e.g. /sitemap_index.xml, /wp-sitemap.xml) to recover active sitemaps
+  if (urlMap.size === 0 && !isDirectSitemap) {
     onProgress?.({
-      phase: 'traversal',
-      message: `Parsing sitemap: ${current.url}`,
-      sitemapsFound: visitedSitemaps.size,
-      urlsDiscovered: urlMap.size,
+      phase: 'probe',
+      message: 'Initial sitemaps yielded 0 URLs. Checking standard fallback locations...',
+      sitemapsFound: discoveredSitemaps.length,
+      urlsDiscovered: 0,
     });
 
-    try {
-      const resource = await fetcher(current.url);
-      const parsed = parseSitemapXml(resource.content, current.url);
+    const fallbackOrigins = [origin];
+    if (!urlObj.hostname.startsWith('www.')) {
+      fallbackOrigins.push(`${urlObj.protocol}//www.${urlObj.host}`);
+    } else {
+      const nonWwwHost = urlObj.host.replace(/^www\./, '');
+      fallbackOrigins.push(`${urlObj.protocol}//${nonWwwHost}`);
+    }
 
-      const sitemapMeta: DiscoveredSitemap = {
-        url: current.url,
-        type:
-          parsed.type === 'index'
-            ? 'index'
-            : parsed.type === 'rss'
-              ? 'rss'
-              : parsed.type === 'text'
-                ? 'text'
-                : 'standard',
-        urlCount: parsed.urls.length,
-        discoveredVia: current.discoveredVia,
-        isValid: parsed.isValid,
-        error: parsed.errors.length > 0 ? parsed.errors.join('; ') : undefined,
-        children: parsed.childSitemaps.length > 0 ? parsed.childSitemaps : undefined,
-      };
+    const recoveryQueue: typeof sitemapQueue = [];
 
-      discoveredSitemaps.push(sitemapMeta);
+    for (const baseOrigin of fallbackOrigins) {
+      if (recoveryQueue.length > 0) break;
+      for (const fallbackPath of STANDARD_SITEMAP_FALLBACKS) {
+        const fallbackUrl = `${baseOrigin}${fallbackPath}`;
+        if (visitedSitemaps.has(fallbackUrl)) continue;
 
-      if (parsed.errors.length > 0) {
-        errors.push(`Errors in ${current.url}: ${parsed.errors.join(', ')}`);
-      }
-      if (parsed.warnings.length > 0) {
-        warnings.push(...parsed.warnings.map((w) => `[${current.url}] ${w}`));
-      }
-
-      // If sitemap index, enqueue children
-      if (parsed.type === 'index' && parsed.childSitemaps.length > 0) {
-        if (current.depth < maxDepth) {
-          for (const childUrl of parsed.childSitemaps) {
-            if (!visitedSitemaps.has(childUrl)) {
-              sitemapQueue.push({
-                url: childUrl,
-                depth: current.depth + 1,
-                discoveredVia: 'index_child',
-              });
-            }
+        try {
+          const res = await fetcher(fallbackUrl);
+          if (
+            res &&
+            res.content &&
+            (res.content.includes('<urlset') ||
+              res.content.includes('<sitemapindex') ||
+              res.content.includes('<sitemap') ||
+              res.content.includes('<rss') ||
+              res.content.includes('<feed'))
+          ) {
+            recoveryQueue.push({
+              url: fallbackUrl,
+              depth: 1,
+              discoveredVia: 'fallback_guess',
+            });
+            break; // Stop at first valid standard fallback
           }
-        } else {
-          warnings.push(`Reached maximum recursion depth (${maxDepth}) at ${current.url}`);
+        } catch {
+          // Continue probing
         }
       }
+    }
 
-      // Collect URLs
-      for (const discoveredUrl of parsed.urls) {
-        totalDiscoveredCount++;
-        if (urlMap.has(discoveredUrl.url)) {
-          duplicateUrlCount++;
-        } else {
-          if (urlMap.size >= maxUrls) {
-            limitReached = true;
-            // Stop processing once configured ceiling is reached
-            break;
-          }
-          urlMap.set(discoveredUrl.url, discoveredUrl);
-        }
-      }
-
-      if (limitReached) {
-        warnings.push(
-          `Configured audit limit of ${maxUrls} URLs reached. Stopping further discovery.`,
-        );
-        break;
-      }
-    } catch (fetchErr: unknown) {
-      const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
-      discoveredSitemaps.push({
-        url: current.url,
-        type: 'standard',
-        urlCount: 0,
-        discoveredVia: current.discoveredVia,
-        isValid: false,
-        error: msg,
-      });
-      errors.push(`Failed to fetch sitemap ${current.url}: ${msg}`);
+    if (recoveryQueue.length > 0) {
+      warnings.push(
+        `Initial sitemaps yielded 0 URLs. Recovered active alternative sitemap at ${recoveryQueue[0].url}.`,
+      );
+      await processQueue(recoveryQueue);
     }
   }
 
