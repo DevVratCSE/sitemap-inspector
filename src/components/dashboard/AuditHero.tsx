@@ -25,6 +25,9 @@ export const AuditHero: React.FC<AuditHeroProps> = ({ onStartAudit, isLoading })
       return;
     }
 
+    // Strip leading slashes if someone entered /example.com
+    cleanUrl = cleanUrl.replace(/^\/+/, '');
+
     if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
       cleanUrl = `https://${cleanUrl}`;
     }
@@ -37,6 +40,10 @@ export const AuditHero: React.FC<AuditHeroProps> = ({ onStartAudit, isLoading })
       }
       if (parsed.hostname.toLowerCase() === 'localhost' || parsed.hostname.endsWith('.local')) {
         setValidationError('Localhost and private network inspection is forbidden');
+        return;
+      }
+      if (!parsed.hostname.includes('.')) {
+        setValidationError('Please enter a valid domain name (e.g. example.com)');
         return;
       }
     } catch {

@@ -14,10 +14,10 @@ export class MemoryRateLimiter {
   private lastCleanup: number = Date.now();
 
   /**
-   * @param maxRequests - Maximum requests permitted within windowMs (default: 60)
+   * @param maxRequests - Maximum requests permitted within windowMs (default: 300)
    * @param windowMs - Window duration in milliseconds (default: 60,000 = 1 minute)
    */
-  constructor(maxRequests = 60, windowMs = 60000) {
+  constructor(maxRequests = 300, windowMs = 60000) {
     this.maxRequests = maxRequests;
     this.windowMs = windowMs;
   }
@@ -71,4 +71,4 @@ export class MemoryRateLimiter {
   }
 }
 
-export const globalRateLimiter = new MemoryRateLimiter(60, 60000); // 60 requests per minute per IP
+export const globalRateLimiter = new MemoryRateLimiter(300, 60000); // 300 requests per minute per IP

@@ -23,6 +23,8 @@ describe('URL Auditor & Status Classifier', () => {
       expect(classifyStatus(0, 'TypeError: Failed to fetch (CORS)')).toBe('cors_blocked');
       expect(classifyStatus(0, 'Connection refused')).toBe('network_error');
       expect(classifyStatus(undefined, 'Validation failed')).toBe('blocked');
+      expect(classifyStatus(0, 'Too many requests. Please slow down.')).toBe('rate_limited');
+      expect(classifyStatus(undefined, 'Rate limit exceeded')).toBe('rate_limited');
     });
   });
 
@@ -92,6 +94,43 @@ describe('URL Auditor & Status Classifier', () => {
       expect(results[0].attempts).toBe(2);
       // Worker was invoked as fallback
       expect(mockWorkerCaller).toHaveBeenCalled();
+    });
+
+    it('aggregates multiple CORS failures into batched Worker calls (up to 5 per batch)', async () => {
+      const mockDirectFetch = vi.fn(async (): Promise<Response> => {
+        throw new TypeError('Failed to fetch (CORS blocked)');
+      });
+
+      const calledBatches: string[][] = [];
+      const mockWorkerCaller = vi.fn(async (urls: string[]) => {
+        calledBatches.push(urls);
+        return urls.map((url) => ({
+          url,
+          finalUrl: url,
+          statusCode: 200,
+          redirectChain: [],
+          responseTimeMs: 20,
+        }));
+      });
+
+      const fiveUrls: DiscoveredUrl[] = [
+        { url: 'https://example.com/p1', sourceSitemap: 'sitemap.xml' },
+        { url: 'https://example.com/p2', sourceSitemap: 'sitemap.xml' },
+        { url: 'https://example.com/p3', sourceSitemap: 'sitemap.xml' },
+        { url: 'https://example.com/p4', sourceSitemap: 'sitemap.xml' },
+        { url: 'https://example.com/p5', sourceSitemap: 'sitemap.xml' },
+      ];
+
+      const controller = startUrlAudit(fiveUrls, { ...config, concurrency: 5 }, undefined, {
+        directFetchFn: mockDirectFetch as unknown as typeof fetch,
+        workerBatchCaller: mockWorkerCaller,
+      });
+
+      const results = await controller.promise;
+      expect(results).toHaveLength(5);
+      // Rather than 5 individual calls of size 1, it should batch them
+      expect(calledBatches.length).toBeLessThanOrEqual(2);
+      expect(calledBatches[0].length).toBeGreaterThan(1);
     });
   });
 });

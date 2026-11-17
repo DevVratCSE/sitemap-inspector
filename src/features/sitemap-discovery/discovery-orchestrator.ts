@@ -34,6 +34,17 @@ const STANDARD_SITEMAP_FALLBACKS = [
   '/sitemap_index.xml',
   '/sitemap-index.xml',
   '/wp-sitemap.xml',
+  '/sitemap.xml.gz',
+  '/sitemap_index.xml.gz',
+  '/post-sitemap.xml',
+  '/page-sitemap.xml',
+  '/category-sitemap.xml',
+  '/sitemap/sitemap.xml',
+  '/sitemap/index.xml',
+  '/sitemap1.xml',
+  '/sitemap.rss',
+  '/rss.xml',
+  '/feed/',
 ];
 
 /**
@@ -77,6 +88,7 @@ export async function discoverSitemaps(
     urlObj.pathname.endsWith('.xml') ||
     urlObj.pathname.endsWith('.xml.gz') ||
     urlObj.pathname.endsWith('.txt') ||
+    urlObj.pathname.endsWith('.rss') ||
     urlObj.pathname.toLowerCase().includes('sitemap');
 
   if (isDirectSitemap) {
@@ -86,7 +98,7 @@ export async function discoverSitemaps(
       discoveredVia: 'manual',
     });
   } else {
-    // Step 1: Probe robots.txt
+    // Step 1: Probe robots.txt (with fallback to alternate protocol or www/non-www variant)
     onProgress?.({
       phase: 'robots',
       message: `Checking robots.txt at ${origin}/robots.txt...`,
@@ -94,26 +106,43 @@ export async function discoverSitemaps(
       urlsDiscovered: 0,
     });
 
-    const robotsUrl = `${origin}/robots.txt`;
-    try {
-      const robotsResource = await fetcher(robotsUrl);
-      if (robotsResource && robotsResource.content) {
-        robotsTxtFound = true;
-        const parsedRobots = parseRobotsTxt(robotsResource.content, origin);
+    const candidateRobotsUrls = [`${origin}/robots.txt`];
+    if (urlObj.protocol === 'https:') {
+      candidateRobotsUrls.push(`http://${urlObj.host}/robots.txt`);
+    }
+    if (!urlObj.hostname.startsWith('www.')) {
+      candidateRobotsUrls.push(`${urlObj.protocol}//www.${urlObj.host}/robots.txt`);
+    } else {
+      const nonWwwHost = urlObj.host.replace(/^www\./, '');
+      candidateRobotsUrls.push(`${urlObj.protocol}//${nonWwwHost}/robots.txt`);
+    }
 
-        if (parsedRobots.sitemaps.length > 0) {
-          sitemapInRobotsTxt = true;
-          for (const sitemapUrl of parsedRobots.sitemaps) {
-            sitemapQueue.push({
-              url: sitemapUrl,
-              depth: 1,
-              discoveredVia: 'robots.txt',
-            });
+    for (const robotsUrl of candidateRobotsUrls) {
+      try {
+        const robotsResource = await fetcher(robotsUrl);
+        if (robotsResource && robotsResource.content && robotsResource.content.trim().length > 0) {
+          robotsTxtFound = true;
+          const parsedRobots = parseRobotsTxt(robotsResource.content, origin);
+
+          if (parsedRobots.sitemaps.length > 0) {
+            sitemapInRobotsTxt = true;
+            for (const sitemapUrl of parsedRobots.sitemaps) {
+              sitemapQueue.push({
+                url: sitemapUrl,
+                depth: 1,
+                discoveredVia: 'robots.txt',
+              });
+            }
+            break;
           }
         }
+      } catch {
+        // Try next candidate robots URL
       }
-    } catch {
-      warnings.push(`robots.txt could not be retrieved from ${robotsUrl}`);
+    }
+
+    if (!robotsTxtFound) {
+      warnings.push(`robots.txt could not be retrieved from ${origin}/robots.txt`);
     }
 
     // Step 2: If robots.txt had no sitemaps, probe standard fallback paths
@@ -125,38 +154,44 @@ export async function discoverSitemaps(
         urlsDiscovered: 0,
       });
 
-      for (const fallbackPath of STANDARD_SITEMAP_FALLBACKS) {
-        const fallbackUrl = `${origin}${fallbackPath}`;
-        try {
-          const res = await fetcher(fallbackUrl);
-          if (
-            res &&
-            res.content &&
-            (res.content.includes('<urlset') ||
-              res.content.includes('<sitemapindex') ||
-              res.content.includes('<sitemap'))
-          ) {
-            sitemapQueue.push({
-              url: fallbackUrl,
-              depth: 1,
-              discoveredVia: 'fallback_guess',
-            });
-            break; // Stop at first valid standard location
+      const fallbackOrigins = [origin];
+      if (!urlObj.hostname.startsWith('www.')) {
+        fallbackOrigins.push(`${urlObj.protocol}//www.${urlObj.host}`);
+      }
+
+      for (const baseOrigin of fallbackOrigins) {
+        if (sitemapQueue.length > 0) break;
+        for (const fallbackPath of STANDARD_SITEMAP_FALLBACKS) {
+          const fallbackUrl = `${baseOrigin}${fallbackPath}`;
+          try {
+            const res = await fetcher(fallbackUrl);
+            if (
+              res &&
+              res.content &&
+              (res.content.includes('<urlset') ||
+                res.content.includes('<sitemapindex') ||
+                res.content.includes('<sitemap') ||
+                res.content.includes('<rss') ||
+                res.content.includes('<feed'))
+            ) {
+              sitemapQueue.push({
+                url: fallbackUrl,
+                depth: 1,
+                discoveredVia: 'fallback_guess',
+              });
+              break; // Stop at first valid standard location
+            }
+          } catch {
+            // Continue probing
           }
-        } catch {
-          // Continue probing
         }
       }
     }
   }
 
-  // If still no sitemaps found, try root sitemap.xml as a last resort
+  // If no sitemaps found anywhere, record warning
   if (sitemapQueue.length === 0 && !isDirectSitemap) {
-    sitemapQueue.push({
-      url: `${origin}/sitemap.xml`,
-      depth: 1,
-      discoveredVia: 'fallback_guess',
-    });
+    warnings.push(`No XML sitemaps found in robots.txt or standard paths for ${targetDomain}.`);
   }
 
   // Step 3: Traversal of sitemaps

@@ -175,4 +175,84 @@ describe('Sitemap Discovery Orchestrator', () => {
     expect(result.urls).toHaveLength(2);
     expect(result.duplicateUrlCount).toBe(1);
   });
+
+  it('probes protocol and www fallbacks when apex HTTPS robots.txt is unavailable', async () => {
+    const mockFetcher = vi.fn(async (url: string): Promise<FetchedResource> => {
+      // Simulate https://example.com/robots.txt failing (e.g. SSL or connection refused)
+      if (url === 'https://example.com/robots.txt') {
+        throw new Error('Connection refused');
+      }
+      // Protocol fallback succeeds
+      if (url === 'http://example.com/robots.txt') {
+        return {
+          url,
+          content: 'User-agent: *\nSitemap: https://example.com/fallback-sitemap.xml',
+          contentType: 'text/plain',
+          isGzip: false,
+          fetchedVia: 'direct',
+          sizeBytes: 65,
+        };
+      }
+      if (url === 'https://example.com/fallback-sitemap.xml') {
+        return {
+          url,
+          content: `<?xml version="1.0" encoding="UTF-8"?>
+            <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>https://example.com/item-from-protocol-fallback</loc></url>
+            </urlset>`,
+          contentType: 'application/xml',
+          isGzip: false,
+          fetchedVia: 'direct',
+          sizeBytes: 200,
+        };
+      }
+      throw new Error('Not found');
+    });
+
+    const result = await discoverSitemaps(
+      'https://example.com',
+      defaultConfig,
+      undefined,
+      mockFetcher,
+    );
+
+    expect(result.robotsTxtFound).toBe(true);
+    expect(result.sitemapInRobotsTxt).toBe(true);
+    expect(result.urls).toHaveLength(1);
+    expect(result.urls[0].url).toBe('https://example.com/item-from-protocol-fallback');
+  });
+
+  it('discovers sitemaps from expanded standard fallbacks such as /wp-sitemap.xml', async () => {
+    const mockFetcher = vi.fn(async (url: string): Promise<FetchedResource> => {
+      if (url.includes('robots.txt')) {
+        throw new Error('404');
+      }
+      if (url === 'https://example.com/wp-sitemap.xml') {
+        return {
+          url,
+          content: `<?xml version="1.0" encoding="UTF-8"?>
+            <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>https://example.com/wp-post-1</loc></url>
+            </urlset>`,
+          contentType: 'application/xml',
+          isGzip: false,
+          fetchedVia: 'direct',
+          sizeBytes: 200,
+        };
+      }
+      throw new Error('404');
+    });
+
+    const result = await discoverSitemaps(
+      'https://example.com',
+      defaultConfig,
+      undefined,
+      mockFetcher,
+    );
+
+    expect(result.discoveredSitemaps).toHaveLength(1);
+    expect(result.discoveredSitemaps[0].url).toBe('https://example.com/wp-sitemap.xml');
+    expect(result.urls).toHaveLength(1);
+    expect(result.urls[0].url).toBe('https://example.com/wp-post-1');
+  });
 });

@@ -195,7 +195,7 @@ export async function handleFetchResource(request: Request, clientIp: string): P
 
   return new Response(
     JSON.stringify({
-      url: targetUrl,
+      url: response.url || targetUrl,
       contentType,
       content: finalContent,
       isGzip,

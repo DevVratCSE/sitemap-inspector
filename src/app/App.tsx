@@ -96,7 +96,7 @@ export const App: React.FC = () => {
 
     try {
       // Step 1: Discover Sitemaps & Extract URLs
-      const discovery = await discoverSitemaps(targetUrl, config, (p) => {
+      const discovery = await discoverSitemaps(rawUrl, config, (p) => {
         setCurrentMessage(p.message);
       });
 

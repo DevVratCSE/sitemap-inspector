@@ -174,5 +174,34 @@ describe('Worker Gateway Integration Tests', () => {
       const data = await response.json();
       expect(data.error).toMatch(/forbidden host/i);
     });
+
+    it('returns canonical URL after outbound redirect', async () => {
+      const mockFetch = vi.fn(async (_url: string) => {
+        return new Response('User-agent: *\nAllow: /', {
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' },
+        });
+      });
+
+      // Override global fetch in test environment
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+      try {
+        const request = new Request('http://localhost/api/fetch-resource', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: 'https://example.com/robots.txt' }),
+        });
+
+        const response = await handleFetchResource(request, '192.0.2.55');
+        expect(response.status).toBe(200);
+        const data = await response.json();
+        expect(data.url).toBe('https://example.com/robots.txt');
+        expect(data.content).toContain('User-agent: *');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
   });
 });

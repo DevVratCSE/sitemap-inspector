@@ -14,6 +14,15 @@ export type AuditProgressCallback = (progress: AuditProgress) => void;
  * Classifies an HTTP status code or error into a structured AuditCategory
  */
 export function classifyStatus(statusCode?: number, errorMsg?: string): AuditCategory {
+  if (
+    statusCode === 429 ||
+    errorMsg?.toLowerCase().includes('too many requests') ||
+    errorMsg?.toLowerCase().includes('rate limit') ||
+    errorMsg?.toLowerCase().includes('429')
+  ) {
+    return 'rate_limited';
+  }
+
   if (!statusCode || statusCode === 0) {
     if (
       errorMsg?.toLowerCase().includes('timed out') ||
@@ -39,7 +48,6 @@ export function classifyStatus(statusCode?: number, errorMsg?: string): AuditCat
   if (statusCode >= 200 && statusCode < 300) return 'success';
   if (statusCode >= 300 && statusCode < 400) return 'redirect';
   if (statusCode === 401 || statusCode === 403) return 'blocked';
-  if (statusCode === 429) return 'rate_limited';
   if (statusCode >= 400 && statusCode < 500) return 'client_error';
   if (statusCode >= 500 && statusCode < 600) return 'server_error';
 
@@ -47,11 +55,12 @@ export function classifyStatus(statusCode?: number, errorMsg?: string): AuditCat
 }
 
 /**
- * Client for calling Cloudflare Worker POST /api/check-batch
+ * Client for calling Cloudflare Worker POST /api/check-batch with retry on 429
  */
 export async function callWorkerCheckBatch(
   urls: string[],
   signal?: AbortSignal,
+  maxRetries = 1,
 ): Promise<
   {
     url: string;
@@ -62,32 +71,153 @@ export async function callWorkerCheckBatch(
     error?: string;
   }[]
 > {
-  const response = await fetch('/api/check-batch', {
-    method: 'POST',
-    signal,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ urls }),
-  });
+  let attempt = 0;
+  while (attempt <= maxRetries) {
+    attempt++;
+    const response = await fetch('/api/check-batch', {
+      method: 'POST',
+      signal,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ urls }),
+    });
 
-  if (!response.ok) {
-    const errorData = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errorData.error || `Worker batch check failed with HTTP ${response.status}`);
+    if (response.status === 429 && attempt <= maxRetries) {
+      const retryAfterHeader = response.headers.get('Retry-After');
+      const waitSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) || 1 : 1;
+      await new Promise((r) => setTimeout(r, Math.min(waitSec * 1000, 2000)));
+      continue;
+    }
+
+    if (!response.ok) {
+      const errorData = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new Error(errorData.error || `Worker batch check failed with HTTP ${response.status}`);
+    }
+
+    const data = (await response.json()) as {
+      results: {
+        url: string;
+        finalUrl: string;
+        statusCode: number;
+        redirectChain: string[];
+        responseTimeMs: number;
+        error?: string;
+      }[];
+    };
+
+    return data.results;
   }
 
-  const data = (await response.json()) as {
-    results: {
-      url: string;
-      finalUrl: string;
-      statusCode: number;
-      redirectChain: string[];
-      responseTimeMs: number;
-      error?: string;
-    }[];
-  };
+  throw new Error('Worker batch check failed: maximum retries exceeded');
+}
 
-  return data.results;
+export interface BatchDispatcherItem {
+  url: string;
+  signal: AbortSignal;
+  resolve: (res: {
+    url: string;
+    finalUrl: string;
+    statusCode: number;
+    redirectChain: string[];
+    responseTimeMs: number;
+    error?: string;
+  }) => void;
+  reject: (err: unknown) => void;
+}
+
+/**
+ * Aggregates individual URL inspection fallback requests into batches of up to 5 URLs
+ * to respect Cloudflare Workers Free-tier subrequest & invocation budgets.
+ */
+export class WorkerBatchDispatcher {
+  private queue: BatchDispatcherItem[] = [];
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private batchSize: number;
+  private batchCaller: typeof callWorkerCheckBatch;
+
+  constructor(batchCaller: typeof callWorkerCheckBatch, batchSize = 5) {
+    this.batchCaller = batchCaller;
+    this.batchSize = batchSize;
+  }
+
+  enqueue(
+    url: string,
+    signal: AbortSignal,
+  ): Promise<{
+    url: string;
+    finalUrl: string;
+    statusCode: number;
+    redirectChain: string[];
+    responseTimeMs: number;
+    error?: string;
+  }> {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        return reject(new DOMException('Audit aborted', 'AbortError'));
+      }
+      this.queue.push({ url, signal, resolve, reject });
+      this.scheduleFlush();
+    });
+  }
+
+  private scheduleFlush() {
+    if (this.queue.length >= this.batchSize) {
+      this.flush();
+    } else if (!this.timer) {
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        this.flush();
+      }, 25);
+    }
+  }
+
+  private async flush() {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    if (this.queue.length === 0) return;
+
+    const currentBatch = this.queue.splice(0, this.batchSize);
+    const urls = currentBatch.map((b) => b.url);
+
+    try {
+      const results = await this.batchCaller(urls);
+      const resultMap = new Map<string, (typeof results)[0]>();
+      for (const r of results) {
+        resultMap.set(r.url, r);
+      }
+
+      for (const item of currentBatch) {
+        const matched = resultMap.get(item.url) || {
+          url: item.url,
+          finalUrl: item.url,
+          statusCode: 0,
+          redirectChain: [],
+          responseTimeMs: 0,
+          error: 'No response for URL in batch',
+        };
+        item.resolve(matched);
+      }
+    } catch (err: unknown) {
+      for (const item of currentBatch) {
+        item.reject(err);
+      }
+    }
+
+    if (this.queue.length > 0) {
+      this.scheduleFlush();
+    }
+  }
+
+  flushNow() {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.flush();
+  }
 }
 
 export interface AuditorController {
@@ -112,6 +242,7 @@ export function startUrlAudit(
   const pool = new ConcurrencyPool({ concurrency: config.concurrency || 3 });
   const batchCaller = options?.workerBatchCaller ?? callWorkerCheckBatch;
   const directFetch = options?.directFetchFn ?? fetch;
+  const dispatcher = new WorkerBatchDispatcher(batchCaller, 5);
 
   const results: UrlAuditResult[] = [];
   let checkedCount = 0;
@@ -169,17 +300,14 @@ export function startUrlAudit(
       directSucceeded = false;
     }
 
-    // Step 2: Cloudflare Worker Fallback Gateway
+    // Step 2: Cloudflare Worker Fallback Gateway (Batched)
     if (!directSucceeded) {
       try {
-        const batchResults = await batchCaller([discovered.url], signal);
-        if (batchResults && batchResults.length > 0) {
-          const item = batchResults[0];
-          statusCode = item.statusCode;
-          finalUrl = item.finalUrl || discovered.url;
-          redirectChain = item.redirectChain || [];
-          errorMsg = item.error;
-        }
+        const item = await dispatcher.enqueue(discovered.url, signal);
+        statusCode = item.statusCode;
+        finalUrl = item.finalUrl || discovered.url;
+        redirectChain = item.redirectChain || [];
+        errorMsg = item.error;
       } catch (workerErr: unknown) {
         errorMsg = workerErr instanceof Error ? workerErr.message : String(workerErr);
       }
@@ -227,6 +355,9 @@ export function startUrlAudit(
     promise: auditPromise,
     pause: () => pool.pause(),
     resume: () => pool.resume(),
-    cancel: () => pool.cancel(),
+    cancel: () => {
+      pool.cancel();
+      dispatcher.flushNow();
+    },
   };
 }
